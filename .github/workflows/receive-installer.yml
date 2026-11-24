@@ -1,0 +1,62 @@
+name: Receive verified installer
+on:
+  workflow_dispatch:
+    inputs:
+      source_url:
+        description: Temporary download URL for the approved installer
+        required: true
+      sha256:
+        description: Expected SHA-256 from the approved build
+        required: true
+      filename:
+        description: Installer filename
+        required: true
+      version:
+        description: Stable version
+        required: true
+permissions:
+  contents: write
+concurrency:
+  group: receive-installer
+  cancel-in-progress: false
+jobs:
+  receive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Download and verify installer
+        env:
+          SOURCE_URL: ${{ inputs.source_url }}
+          EXPECTED_SHA: ${{ inputs.sha256 }}
+          FILENAME: ${{ inputs.filename }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          python - <<'PY'
+          import os,re,hashlib,urllib.request,urllib.parse
+          from pathlib import Path
+          url=os.environ['SOURCE_URL'];name=os.environ['FILENAME'];version=os.environ['VERSION'];sha=os.environ['EXPECTED_SHA']
+          if not re.fullmatch(r'\d+\.\d+\.\d+',version): raise ValueError('Invalid version')
+          if name not in (f'WB-Price-Control-Setup-v{version}.exe',f'WB-Price-Control-v{version}-darwin-arm64.dmg'): raise ValueError('Invalid filename')
+          if not re.fullmatch(r'[0-9a-f]{64}',sha): raise ValueError('Invalid checksum')
+          parsed=urllib.parse.urlsplit(url)
+          if parsed.scheme!='https' or parsed.hostname!='release-assets.githubusercontent.com': raise ValueError('Invalid source host')
+          digest=hashlib.sha256();size=0
+          with urllib.request.urlopen(url,timeout=60) as source,open(name,'wb') as out:
+            if urllib.parse.urlsplit(source.url).hostname!='release-assets.githubusercontent.com': raise ValueError('Invalid redirect')
+            while data:=source.read(1024*1024):
+              size+=len(data)
+              if size>1500000000: raise ValueError('Too large')
+              digest.update(data);out.write(data)
+          if digest.hexdigest()!=sha: raise ValueError('Checksum mismatch')
+          Path(name+'.sha256').write_text(sha+'  '+name+'\n')
+          print('Verified installer:',name,'bytes:',size,'SHA-256:',sha)
+          PY
+      - name: Attach to release draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          FILENAME: ${{ inputs.filename }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          gh release view "v$VERSION" || gh release create "v$VERSION" --draft --title "WB Price Control $VERSION" --notes 'Установщики Windows x64 и macOS Apple Silicon.'
+          gh release upload "v$VERSION" "$FILENAME" "$FILENAME.sha256" --clobber
